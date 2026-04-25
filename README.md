@@ -1,7 +1,7 @@
 # LaunchVid Figma Plugin
 
 Extracts frames, layer trees, and all embedded images from a Figma file
-and sends them to your LaunchVid backend for animated video generation.
+and saves the export JSON on your PC in the `output/` folder.
 
 ## Setup
 
@@ -9,6 +9,7 @@ and sends them to your LaunchVid backend for animated video generation.
 npm install
 npm run build        # compiles plugin.ts + copies ui.html into src/
 npm run package      # creates dist/launchvid-figma-plugin.zip
+npm run save-local   # starts local save server (writes export files to output/)
 ```
 
 ## Important
@@ -75,7 +76,8 @@ Clicking "Export for Video" triggers the plugin to:
 2. Recursively serialize the entire layer tree (positions, sizes,
    text content + styling, fill colors, corner radii)
 3. Export each IMAGE fill as its own PNG (actual photos, illustrations)
-4. POST everything as JSON to your backend
+4. POST everything as JSON to `http://127.0.0.1:3210/save-export`
+5. Local server writes a timestamped JSON file into `output/`
 
 ## Data format sent to backend
 
@@ -124,13 +126,12 @@ Clicking "Export for Video" triggers the plugin to:
 }
 ```
 
-## Update backend URL
+## Save exports on your PC
 
-In `src/ui.html`, find this line and update it:
-
-```js
-const BACKEND_URL = 'https://your-backend.railway.app/analyze';
-```
+1. In this project folder, run: `npm run save-local`
+2. Keep that terminal open
+3. Run plugin export from Figma
+4. Find results in `output/launchvid-export-<timestamp>.json`
 
 ## Notes
 

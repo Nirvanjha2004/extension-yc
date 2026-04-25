@@ -2,3 +2,5 @@ node_modules/
 src/plugin.js
 src/ui.html
 dist/
+output/*
+!output/.gitkeep

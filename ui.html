@@ -618,18 +618,20 @@ window.onmessage = async (event) => {
   if (msg.type === 'EXPORT_DONE') {
     document.getElementById('progress-fill').style.width = '100%';
 
-    // Send the data to your backend
+    // Save export payload to local output folder through local save server
     try {
-      const BACKEND_URL = 'https://your-backend.railway.app/analyze'; // ← update this
+      const LOCAL_SAVE_URL = 'http://127.0.0.1:3210/save-export';
 
-      const response = await fetch(BACKEND_URL, {
+      const payload = {
+        frames: msg.data,
+        appDescription: '',
+        exportedAt: new Date().toISOString(),
+      };
+
+      const response = await fetch(LOCAL_SAVE_URL, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          frames: msg.data,
-          appDescription: '', // could add an input field for this
-          exportedAt: new Date().toISOString(),
-        }),
+        body: JSON.stringify(payload),
       });
 
       if (!response.ok) throw new Error(`Server error: ${response.status}`);
@@ -637,12 +639,12 @@ window.onmessage = async (event) => {
       const result = await response.json();
 
       document.getElementById('done-sub').textContent =
-        `${msg.data.length} screens sent successfully. Check your dashboard for the video.`;
+        `${msg.data.length} screens saved to ${result.fileName} in your output folder.`;
       showScreen('done-screen');
 
     } catch (err) {
       document.getElementById('error-msg').textContent =
-        `Export failed: ${err.message}. Make sure your backend is running.`;
+        `Export failed: ${err.message}. Start local saver with: npm run save-local`;
       showScreen('error-screen');
     }
   }

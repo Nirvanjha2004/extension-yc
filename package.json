@@ -8,7 +8,8 @@
     "build:ts": "tsc -p tsconfig.json",
     "build:ui": "copyfiles -f ui.html src",
     "build": "npm run clean && npm run build:ts && npm run build:ui",
-    "package": "npm run build && node scripts/package.mjs"
+    "package": "npm run build && node scripts/package.mjs",
+    "save-local": "node scripts/save-local.mjs"
   },
   "devDependencies": {
     "@figma/plugin-typings": "^1.116.0",
