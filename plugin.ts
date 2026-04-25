@@ -2,7 +2,10 @@
 // Communicates with UI via figma.ui.postMessage / figma.ui.onmessage
 
 declare function btoa(data: string): string;
-
+declare class TextDecoder {
+  constructor(label?: string, options?: any);
+  decode(input?: Uint8Array, options?: any): string;
+}
 figma.showUI(__html__, { width: 380, height: 580, title: "LaunchVid" });
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -22,7 +25,14 @@ interface SerializedLayer {
   stroke: StrokeData | null;
   text: TextData | null;
   children: SerializedLayer[];
-  exportedImageBase64: string | null; // for IMAGE fills
+  exportedImageBase64: string | null; // base64 PNG for IMAGE fills and VECTOR/BOOLEAN nodes
+  exportedSvg: string | null;         // raw SVG string for VECTOR nodes (preferred over PNG)
+}
+
+interface GradientStop {
+  hex: string;
+  position: number; // 0–1
+  opacity: number;
 }
 
 interface FillData {
@@ -30,6 +40,10 @@ interface FillData {
   hex?: string;
   opacity?: number;
   imageHash?: string;
+  // gradient-specific
+  gradientType?: "LINEAR" | "RADIAL" | "ANGULAR" | "DIAMOND";
+  gradientStops?: GradientStop[];
+  gradientTransform?: Transform;
 }
 
 interface StrokeData {
@@ -55,7 +69,7 @@ interface FrameInfo {
   pageName: string;
   width: number;
   height: number;
-  thumbnailBase64: string; // low-res preview for the UI checklist
+  thumbnailBase64: string;
   isLikelyAppScreen: boolean;
 }
 
@@ -66,33 +80,42 @@ function hexFromRgb(r: number, g: number, b: number): string {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
+function uint8ToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 function isLikelyAppScreen(frame: FrameNode): boolean {
   const { width, height, name, children } = frame;
   const lowerName = name.toLowerCase();
 
-  // skip obvious junk pages
-  const junkyWords = ["component", "archive", "wip", "old", "backup",
-    "copy", "style", "color", "icon", "asset", "kit", "template",
-    "library", "guide", "spec", "reference", "token"];
+  const junkyWords = [
+    "component", "archive", "wip", "old", "backup", "copy",
+    "style", "color", "icon", "asset", "kit", "template",
+    "library", "guide", "spec", "reference", "token",
+  ];
   if (junkyWords.some(w => lowerName.includes(w))) return false;
-
-  // must have some content
   if (children.length < 2) return false;
 
-  // phone screen sizes (portrait)
   const isPhone = width >= 320 && width <= 430 && height >= 600 && height <= 950;
-  // web / tablet sizes
-  const isWeb = width >= 768 && width <= 1920 && height >= 500;
-  // square / banner — probably not an app screen
+  const isWeb   = width >= 768 && width <= 1920 && height >= 500;
   const isSquarish = Math.abs(width - height) < 50;
 
   return (isPhone || isWeb) && !isSquarish;
 }
 
-async function getFillData(fills: readonly Paint[]): Promise<FillData | null> {
+// ─── Fill extraction ──────────────────────────────────────────────────────────
+
+function getFillData(fills: readonly Paint[]): FillData | null {
   if (!fills || fills.length === 0) return null;
-  const fill = fills[fills.length - 1]; // topmost fill
-  if (!fill.visible) return null;
+
+  // Use the topmost visible fill
+  const fill = [...fills].reverse().find(f => f.visible !== false);
+  if (!fill) return null;
 
   if (fill.type === "SOLID") {
     return {
@@ -101,120 +124,236 @@ async function getFillData(fills: readonly Paint[]): Promise<FillData | null> {
       opacity: fill.opacity ?? 1,
     };
   }
+
   if (fill.type === "IMAGE") {
     return {
       type: "IMAGE",
       imageHash: fill.imageHash ?? undefined,
     };
   }
-  return { type: "GRADIENT" };
+
+  if (
+    fill.type === "GRADIENT_LINEAR" ||
+    fill.type === "GRADIENT_RADIAL" ||
+    fill.type === "GRADIENT_ANGULAR" ||
+    fill.type === "GRADIENT_DIAMOND"
+  ) {
+    const gradientTypeMap: Record<string, "LINEAR" | "RADIAL" | "ANGULAR" | "DIAMOND"> = {
+      GRADIENT_LINEAR:  "LINEAR",
+      GRADIENT_RADIAL:  "RADIAL",
+      GRADIENT_ANGULAR: "ANGULAR",
+      GRADIENT_DIAMOND: "DIAMOND",
+    };
+    return {
+      type: "GRADIENT",
+      gradientType: gradientTypeMap[fill.type],
+      gradientStops: fill.gradientStops.map(stop => ({
+        hex:      hexFromRgb(stop.color.r, stop.color.g, stop.color.b),
+        position: stop.position,
+        opacity:  stop.color.a,
+      })),
+      gradientTransform: fill.gradientTransform,
+    };
+  }
+
+  return { type: "NONE" };
 }
 
-async function exportImageFill(imageHash: string): Promise<string | null> {
+// ─── Image export — two-strategy approach ─────────────────────────────────────
+
+/**
+ * Strategy 1: use figma.getImageByHash() — fastest, no re-render needed.
+ * Strategy 2: exportAsync on the node — fallback when hash lookup fails
+ *             (common inside BOOLEAN_OPERATION children).
+ */
+async function exportImageByHash(
+  imageHash: string,
+  fallbackNode?: SceneNode,
+): Promise<string | null> {
+  // Strategy 1 — hash lookup
   try {
     const image = figma.getImageByHash(imageHash);
-    if (!image) return null;
-    const bytes = await image.getBytesAsync();
-    // convert Uint8Array → base64
-    let binary = "";
-    const chunkSize = 8192;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode(...chunk);
+    if (image) {
+      const bytes = await image.getBytesAsync();
+      if (bytes && bytes.length > 0) {
+        return uint8ToBase64(bytes);
+      }
     }
-    return btoa(binary);
-  } catch {
+  } catch (e) {
+    console.warn(`[LaunchVid] getBytesAsync failed for hash ${imageHash}:`, e);
+  }
+
+  // Strategy 2 — exportAsync on the node itself
+  if (fallbackNode) {
+    try {
+      console.log(`[LaunchVid] Falling back to exportAsync for: "${fallbackNode.name}"`);
+      const bytes = await (fallbackNode as ExportMixin).exportAsync({
+        format: "PNG",
+        constraint: { type: "SCALE", value: 1 },
+      });
+      if (bytes && bytes.length > 0) {
+        return uint8ToBase64(bytes);
+      }
+    } catch (e) {
+      console.error(`[LaunchVid] exportAsync also failed for "${fallbackNode.name}":`, e);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Export any node as a PNG (used for VECTOR, BOOLEAN_OPERATION, ELLIPSE with
+ * complex fills that can't be represented as a simple CSS shape).
+ */
+async function exportNodeAsPng(node: SceneNode): Promise<string | null> {
+  try {
+    const bytes = await (node as ExportMixin).exportAsync({
+      format: "PNG",
+      constraint: { type: "SCALE", value: 2 },
+    });
+    return bytes && bytes.length > 0 ? uint8ToBase64(bytes) : null;
+  } catch (e) {
+    console.error(`[LaunchVid] exportNodeAsPng failed for "${node.name}":`, e);
     return null;
   }
 }
 
+/**
+ * Export a VECTOR node as SVG — preferred over PNG for crisp rendering at
+ * any resolution. Falls back to PNG if SVG export fails.
+ */
+async function exportNodeAsSvg(node: SceneNode): Promise<{ svg: string | null; png: string | null }> {
+  let svg: string | null = null;
+  let png: string | null = null;
+
+  try {
+    const bytes = await (node as ExportMixin).exportAsync({ format: "SVG" });
+    svg = new TextDecoder().decode(bytes);
+  } catch (e) {
+    console.warn(`[LaunchVid] SVG export failed for "${node.name}", trying PNG:`, e);
+    png = await exportNodeAsPng(node);
+  }
+
+  return { svg, png };
+}
+
+// ─── Node serializer ──────────────────────────────────────────────────────────
+
 async function serializeNode(node: SceneNode, depth = 0): Promise<SerializedLayer> {
   const base: SerializedLayer = {
-    id: node.id,
-    name: node.name,
-    type: node.type,
-    x: "x" in node ? (node.x as number) : 0,
-    y: "y" in node ? (node.y as number) : 0,
-    width: "width" in node ? (node.width as number) : 0,
-    height: "height" in node ? (node.height as number) : 0,
-    visible: "visible" in node ? (node.visible as boolean) : true,
-    opacity: "opacity" in node ? (node.opacity as number) : 1,
+    id:           node.id,
+    name:         node.name,
+    type:         node.type,
+    x:            "x"            in node ? (node.x as number)       : 0,
+    y:            "y"            in node ? (node.y as number)       : 0,
+    width:        "width"        in node ? (node.width as number)   : 0,
+    height:       "height"       in node ? (node.height as number)  : 0,
+    visible:      "visible"      in node ? (node.visible as boolean): true,
+    opacity:      "opacity"      in node ? (node.opacity as number) : 1,
     cornerRadius: "cornerRadius" in node ? (node.cornerRadius as number) : 0,
-    fill: null,
-    stroke: null,
-    text: null,
-    children: [],
+    fill:              null,
+    stroke:            null,
+    text:              null,
+    children:          [],
     exportedImageBase64: null,
+    exportedSvg:         null,
   };
 
-  // fills
-  if ("fills" in node && Array.isArray(node.fills)) {
-    const fillData = await getFillData(node.fills as Paint[]);
+  // ── Fills ──
+  if ("fills" in node && Array.isArray(node.fills) && (node.fills as Paint[]).length > 0) {
+    const fillData = getFillData(node.fills as Paint[]);
     base.fill = fillData;
 
-    // if it's an image fill, export the actual image bytes
     if (fillData?.type === "IMAGE" && fillData.imageHash) {
-      base.exportedImageBase64 = await exportImageFill(fillData.imageHash);
+      // Pass the node as fallback for BOOLEAN_OPERATION children etc.
+      base.exportedImageBase64 = await exportImageByHash(fillData.imageHash, node);
     }
   }
 
-  // strokes
+  // ── Strokes ──
   if ("strokes" in node && Array.isArray(node.strokes) && node.strokes.length > 0) {
-    const stroke = node.strokes[0] as SolidPaint;
-    if (stroke.type === "SOLID") {
+    const stroke = (node.strokes as Paint[]).find(s => s.type === "SOLID") as SolidPaint | undefined;
+    if (stroke) {
       base.stroke = {
-        hex: hexFromRgb(stroke.color.r, stroke.color.g, stroke.color.b),
+        hex:    hexFromRgb(stroke.color.r, stroke.color.g, stroke.color.b),
         weight: "strokeWeight" in node ? (node.strokeWeight as number) : 1,
       };
     }
   }
 
-  // text
+  // ── Text ──
   if (node.type === "TEXT") {
     const t = node as TextNode;
+
     const rawWeight = t.fontWeight;
-    const fontWeight = typeof rawWeight === "number" ? rawWeight :
-      typeof rawWeight === "symbol" ? 400 : 400;
+    const fontWeight = typeof rawWeight === "number" ? rawWeight : 400;
 
     const rawSize = t.fontSize;
     const fontSize = typeof rawSize === "number" ? rawSize : 16;
 
     const rawFamily = t.fontName;
-    const fontFamily = typeof rawFamily === "symbol" ? "Inter" :
-      (rawFamily as FontName).family;
+    const fontFamily = (rawFamily as FontName).family ?? "Inter";
 
-    const rawColor = t.fills;
     let colorHex = "#000000";
-    if (Array.isArray(rawColor) && rawColor.length > 0) {
-      const c = rawColor[0] as SolidPaint;
+    if (Array.isArray(t.fills) && t.fills.length > 0) {
+      const c = (t.fills as Paint[])[0];
       if (c.type === "SOLID") colorHex = hexFromRgb(c.color.r, c.color.g, c.color.b);
     }
 
     const rawLH = t.lineHeight;
-    const lineHeight = typeof rawLH === "symbol" ? "AUTO" :
-      rawLH.unit === "AUTO" ? "AUTO" : (rawLH as { unit: string; value: number }).value;
+    const lineHeight: number | "AUTO" =
+      typeof rawLH === "symbol" ? "AUTO" :
+      rawLH.unit === "AUTO"     ? "AUTO" :
+      (rawLH as { unit: string; value: number }).value;
 
     const rawLS = t.letterSpacing;
-    const letterSpacing = typeof rawLS === "symbol" ? 0 :
+    const letterSpacing =
+      typeof rawLS === "symbol" ? 0 :
       (rawLS as { unit: string; value: number }).value;
 
     base.text = {
-      characters: t.characters,
+      characters:   t.characters,
       fontSize,
       fontWeight,
       fontFamily,
-      color: colorHex,
-      textAlign: typeof t.textAlignHorizontal === "symbol" ? "LEFT" : t.textAlignHorizontal,
+      color:        colorHex,
+      textAlign:    typeof t.textAlignHorizontal === "symbol" ? "LEFT" : t.textAlignHorizontal,
       lineHeight,
       letterSpacing,
     };
   }
 
-  // children — recurse but cap depth to avoid explosion on huge files
+  // ── VECTOR nodes → export as SVG (crisp at any scale) ──
+  // We do this regardless of fill because vector paths can't be
+  // represented as a CSS div — they need SVG or a raster image.
+  if (node.type === "VECTOR") {
+    const { svg, png } = await exportNodeAsSvg(node);
+    base.exportedSvg         = svg;
+    base.exportedImageBase64 = png; // only set if SVG failed
+  }
+
+  // ── BOOLEAN_OPERATION → export as PNG (complex path math) ──
+  if (node.type === "BOOLEAN_OPERATION") {
+    base.exportedImageBase64 = await exportNodeAsPng(node);
+    // Still recurse into children so the layer tree is complete,
+    // but the renderer should prefer the rasterized PNG for display.
+  }
+
+  // ── ELLIPSE with non-trivial fills → export PNG as fallback ──
+  // Simple SOLID fills on ellipses can be rendered with border-radius: 50%,
+  // but IMAGE or GRADIENT fills on ellipses need a raster export.
+  if (node.type === "ELLIPSE" && base.fill && base.fill.type !== "SOLID") {
+    base.exportedImageBase64 = await exportNodeAsPng(node);
+  }
+
+  // ── Children (recursive, capped at depth 6) ──
   if ("children" in node && depth < 6) {
-    const childNodes = (node as FrameNode).children;
+    // For BOOLEAN_OPERATION we already have a PNG of the whole thing,
+    // but still recurse so metadata is available.
+    const childNodes = (node as FrameNode | GroupNode | BooleanOperationNode).children;
     for (const child of childNodes) {
-      if ("visible" in child && !child.visible) continue; // skip hidden layers
+      if ("visible" in child && !(child as SceneNode & { visible: boolean }).visible) continue;
       base.children.push(await serializeNode(child, depth + 1));
     }
   }
@@ -229,13 +368,11 @@ async function scanAllFrames(): Promise<FrameInfo[]> {
   const pages = figma.root.children;
 
   for (const page of pages) {
-    // switch to each page to access its nodes
     await figma.setCurrentPageAsync(page);
 
     const topLevelFrames = page.children.filter(n => n.type === "FRAME") as FrameNode[];
 
     for (const frame of topLevelFrames) {
-      // generate a small thumbnail (max 200px wide) for the preview in UI
       let thumbnailBase64 = "";
       try {
         const scale = Math.min(1, 200 / frame.width);
@@ -243,23 +380,18 @@ async function scanAllFrames(): Promise<FrameInfo[]> {
           format: "PNG",
           constraint: { type: "SCALE", value: scale },
         });
-        let binary = "";
-        const chunk = 8192;
-        for (let i = 0; i < bytes.length; i += chunk) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-        }
-        thumbnailBase64 = btoa(binary);
-      } catch {
-        thumbnailBase64 = "";
+        thumbnailBase64 = uint8ToBase64(bytes);
+      } catch (e) {
+        console.warn(`[LaunchVid] Thumbnail failed for "${frame.name}":`, e);
       }
 
       allFrames.push({
-        id: frame.id,
-        name: frame.name,
-        pageId: page.id,
-        pageName: page.name,
-        width: frame.width,
-        height: frame.height,
+        id:               frame.id,
+        name:             frame.name,
+        pageId:           page.id,
+        pageName:         page.name,
+        width:            frame.width,
+        height:           frame.height,
         thumbnailBase64,
         isLikelyAppScreen: isLikelyAppScreen(frame),
       });
@@ -291,32 +423,28 @@ async function exportSelectedFrames(selectedIds: string[]) {
         message: `Exporting "${frame.name}"... (${done + 1}/${selectedIds.length})`,
       });
 
-      // full resolution PNG
+      // Full-resolution @2x PNG of the entire frame (used as fallback renderer)
       let fullPngBase64 = "";
       try {
         const bytes = await frame.exportAsync({
           format: "PNG",
-          constraint: { type: "SCALE", value: 2 }, // @2x for retina
+          constraint: { type: "SCALE", value: 2 },
         });
-        let binary = "";
-        for (let i = 0; i < bytes.length; i += 8192) {
-          binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
-        }
-        fullPngBase64 = btoa(binary);
-      } catch {
-        fullPngBase64 = "";
+        fullPngBase64 = uint8ToBase64(bytes);
+      } catch (e) {
+        console.error(`[LaunchVid] Full frame export failed for "${frame.name}":`, e);
       }
 
-      // full layer tree with all images extracted
+      // Full layer tree with all images, SVGs, gradients extracted
       const layers = await serializeNode(frame);
 
       result.push({
-        frameId: frame.id,
-        frameName: frame.name,
-        pageId: page.id,
-        pageName: page.name,
-        width: frame.width,
-        height: frame.height,
+        frameId:      frame.id,
+        frameName:    frame.name,
+        pageId:       page.id,
+        pageName:     page.name,
+        width:        frame.width,
+        height:       frame.height,
         fullPngBase64,
         layers,
       });
@@ -336,7 +464,7 @@ async function exportSelectedFrames(selectedIds: string[]) {
   figma.ui.postMessage({ type: "FRAMES_LOADED", frames });
 })();
 
-// ─── Handle messages from UI ──────────────────────────────────────────────────
+// ─── Message handler ──────────────────────────────────────────────────────────
 
 figma.ui.onmessage = async (msg) => {
   if (msg.type === "EXPORT_SELECTED") {
