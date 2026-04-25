@@ -65,6 +65,7 @@ interface TextData {
 interface FrameInfo {
   id: string;
   name: string;
+  nodeType: string;
   pageId: string;
   pageName: string;
   width: number;
@@ -102,6 +103,24 @@ function logExportCapabilities(node: SceneNode, context: string) {
   logExportDebug(
     `[LaunchVid] ${context} ${node.name} (${node.type}) capabilities: exportAsync=${typeof anyNode.exportAsync}, clone=${typeof anyNode.clone}, TextDecoder=${typeof TextDecoder}`
   );
+}
+
+function isTopLevelExportableNode(node: SceneNode): boolean {
+  return [
+    "FRAME",
+    "GROUP",
+    "RECTANGLE",
+    "VECTOR",
+    "ELLIPSE",
+    "TEXT",
+    "BOOLEAN_OPERATION",
+    "LINE",
+    "STAR",
+    "POLYGON",
+    "INSTANCE",
+    "COMPONENT",
+    "COMPONENT_SET",
+  ].includes(node.type);
 }
 
 function toUint8Array(bytes: Uint8Array | ArrayBuffer | ArrayBufferView): Uint8Array {
@@ -510,30 +529,35 @@ async function scanAllFrames(): Promise<FrameInfo[]> {
   for (const page of pages) {
     await figma.setCurrentPageAsync(page);
 
-    const topLevelFrames = page.children.filter(n => n.type === "FRAME") as FrameNode[];
+    const topLevelNodes = page.children.filter((node): node is SceneNode => isTopLevelExportableNode(node as SceneNode));
 
-    for (const frame of topLevelFrames) {
+    for (const node of topLevelNodes) {
+      if (!("width" in node) || !("height" in node)) continue;
+
       let thumbnailBase64 = "";
       try {
-        const scale = Math.min(1, 200 / frame.width);
-        const bytes = await frame.exportAsync({
+        const scale = Math.min(1, 200 / node.width);
+        const bytes = await node.exportAsync({
           format: "PNG",
           constraint: { type: "SCALE", value: scale },
         });
-        thumbnailBase64 = uint8ToBase64(bytes);
+        if (bytes && bytes.length > 0) {
+          thumbnailBase64 = uint8ToBase64(bytes);
+        }
       } catch (e) {
-        console.warn(`[LaunchVid] Thumbnail failed for "${frame.name}":`, e);
+        console.warn(`[LaunchVid] Thumbnail failed for "${node.name}":`, e);
       }
 
       allFrames.push({
-        id:               frame.id,
-        name:             frame.name,
+        id:               node.id,
+        name:             node.name,
+        nodeType:         node.type,
         pageId:           page.id,
         pageName:         page.name,
-        width:            frame.width,
-        height:           frame.height,
+        width:            node.width,
+        height:           node.height,
         thumbnailBase64,
-        isLikelyAppScreen: isLikelyAppScreen(frame),
+        isLikelyAppScreen: node.type === "FRAME" ? isLikelyAppScreen(node as FrameNode) : false,
       });
     }
   }
@@ -555,41 +579,40 @@ async function exportSelectedFrames(selectedIds: string[]) {
 
     for (const frameId of selectedIds) {
       const node = page.findOne(n => n.id === frameId);
-      if (!node || node.type !== "FRAME") continue;
-
-      const frame = node as FrameNode;
+      if (!node || !("exportAsync" in node)) continue;
 
       figma.ui.postMessage({
         type: "EXPORT_PROGRESS",
-        message: `Exporting "${frame.name}"... (${done + 1}/${selectedIds.length})`,
+        message: `Exporting "${node.name}"... (${done + 1}/${selectedIds.length})`,
       });
 
       // Full-resolution @2x PNG of the entire frame (used as fallback renderer)
       let fullPngBase64 = "";
       try {
-        const bytes = await frame.exportAsync({
+        const bytes = await (node as SceneNode & ExportMixin).exportAsync({
           format: "PNG",
           constraint: { type: "SCALE", value: 2 },
         });
         if (bytes && bytes.length > 0) {
           fullPngBase64 = uint8ToBase64(bytes);
         } else {
-          logExportDebug(`[LaunchVid] full frame export returned empty bytes for "${frame.name}" (${frame.id})`);
+          logExportDebug(`[LaunchVid] full export returned empty bytes for "${node.name}" (${node.id})`);
         }
       } catch (e) {
-        logExportDebug(`[LaunchVid] Full frame export failed for "${frame.name}" (${frame.id}): ${e instanceof Error ? e.message : String(e)}`);
+        logExportDebug(`[LaunchVid] Full export failed for "${node.name}" (${node.id}): ${e instanceof Error ? e.message : String(e)}`);
       }
 
       // Full layer tree with all images, SVGs, gradients extracted
-      const layers = await serializeNode(frame);
+      const layers = await serializeNode(node as SceneNode);
 
       result.push({
-        frameId:      frame.id,
-        frameName:    frame.name,
+        frameId:      node.id,
+        frameName:    node.name,
+        nodeType:     node.type,
         pageId:       page.id,
         pageName:     page.name,
-        width:        frame.width,
-        height:       frame.height,
+        width:        (node as SceneNode & { width: number }).width,
+        height:       (node as SceneNode & { height: number }).height,
         fullPngBase64,
         layers,
         debugLog: [...exportDebugLog],

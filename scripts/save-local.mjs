@@ -4,6 +4,19 @@ import { resolve } from "node:path";
 
 const PORT = 3210;
 const OUTPUT_DIR = resolve("output");
+const IMAGES_DIR = resolve(OUTPUT_DIR, "images");
+
+function sanitizeFilePart(value) {
+  return String(value)
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80) || "unnamed";
+}
+
+function decodeBase64ToBuffer(base64) {
+  return Buffer.from(base64, "base64");
+}
 
 function walkLayers(layer, visitor, path = []) {
   const nextPath = [...path, layer.name || layer.id || layer.type];
@@ -63,6 +76,48 @@ function printDebugLogs(payload) {
       console.log(line);
     }
   }
+}
+
+async function saveExtractedImages(payload) {
+  const frames = Array.isArray(payload?.frames) ? payload.frames : [];
+  const savedFiles = [];
+
+  await mkdir(IMAGES_DIR, { recursive: true });
+
+  for (const frame of frames) {
+    const frameName = sanitizeFilePart(frame.frameName || frame.pageName || frame.frameId || "frame");
+    const layers = frame.layers;
+    if (!layers) continue;
+
+    const pending = [[layers, [frameName]]];
+
+    while (pending.length > 0) {
+      const [layer, pathParts] = pending.pop();
+      const layerName = sanitizeFilePart(layer.name || layer.id || layer.type);
+      const nextPath = [...pathParts, layerName];
+      const fileStem = nextPath.join("__");
+
+      if (layer.exportedImageBase64) {
+        const pngPath = resolve(IMAGES_DIR, `${fileStem}.png`);
+        await writeFile(pngPath, decodeBase64ToBuffer(layer.exportedImageBase64));
+        savedFiles.push(pngPath);
+      }
+
+      if (layer.exportedSvg) {
+        const svgPath = resolve(IMAGES_DIR, `${fileStem}.svg`);
+        await writeFile(svgPath, layer.exportedSvg, "utf8");
+        savedFiles.push(svgPath);
+      }
+
+      if (Array.isArray(layer.children)) {
+        for (const child of layer.children) {
+          pending.push([child, nextPath]);
+        }
+      }
+    }
+  }
+
+  return savedFiles;
 }
 
 function sendJson(res, statusCode, payload) {
@@ -127,10 +182,17 @@ const server = createServer(async (req, res) => {
 
     await writeFile(filePath, JSON.stringify(parsed, null, 2), "utf8");
 
+    const savedFiles = await saveExtractedImages(parsed);
+    console.log(`[LaunchVid] Saved ${savedFiles.length} extracted image file(s) to ${IMAGES_DIR}`);
+    for (const savedFile of savedFiles) {
+      console.log(`[LaunchVid] saved: ${savedFile}`);
+    }
+
     sendJson(res, 200, {
       ok: true,
       fileName,
       filePath,
+      imageCount: savedFiles.length,
     });
   } catch (error) {
     sendJson(res, 500, {
