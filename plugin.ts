@@ -73,6 +73,56 @@ interface FrameInfo {
   isLikelyAppScreen: boolean;
 }
 
+const exportDebugLog: string[] = [];
+
+function logExportDebug(message: string) {
+  exportDebugLog.push(message);
+  console.log(message);
+}
+
+function bytesToUtf8(bytes: Uint8Array): string {
+  const normalized = toUint8Array(bytes);
+  if (typeof TextDecoder !== "undefined") {
+    return new TextDecoder().decode(normalized);
+  }
+
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < normalized.length; i += chunkSize) {
+    const chunk = normalized.subarray(i, i + chunkSize);
+    for (let j = 0; j < chunk.length; j++) {
+      binary += String.fromCharCode(chunk[j]);
+    }
+  }
+  return binary;
+}
+
+function logExportCapabilities(node: SceneNode, context: string) {
+  const anyNode = node as unknown as { exportAsync?: unknown; clone?: unknown };
+  logExportDebug(
+    `[LaunchVid] ${context} ${node.name} (${node.type}) capabilities: exportAsync=${typeof anyNode.exportAsync}, clone=${typeof anyNode.clone}, TextDecoder=${typeof TextDecoder}`
+  );
+}
+
+function toUint8Array(bytes: Uint8Array | ArrayBuffer | ArrayBufferView): Uint8Array {
+  if (bytes instanceof Uint8Array) return bytes;
+  if (bytes instanceof ArrayBuffer) return new Uint8Array(bytes);
+  return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
+
+function describeBytes(value: unknown): string {
+  if (value == null) return String(value);
+  const objectValue = value as Record<string, unknown>;
+  return [
+    `type=${typeof value}`,
+    `ctor=${(value as { constructor?: { name?: string } }).constructor?.name ?? "unknown"}`,
+    `tag=${Object.prototype.toString.call(value)}`,
+    `hasBuffer=${"buffer" in objectValue}`,
+    `hasSubarray=${typeof (value as { subarray?: unknown }).subarray}`,
+    `hasLength=${"length" in objectValue ? String(objectValue.length) : "false"}`,
+  ].join(" ");
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function hexFromRgb(r: number, g: number, b: number): string {
@@ -81,12 +131,24 @@ function hexFromRgb(r: number, g: number, b: number): string {
 }
 
 function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 8192;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  const normalized = toUint8Array(bytes);
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  let output = "";
+
+  for (let i = 0; i < normalized.length; i += 3) {
+    const byte1 = normalized[i];
+    const byte2 = i + 1 < normalized.length ? normalized[i + 1] : 0;
+    const byte3 = i + 2 < normalized.length ? normalized[i + 2] : 0;
+
+    const triple = (byte1 << 16) | (byte2 << 8) | byte3;
+
+    output += alphabet[(triple >> 18) & 63];
+    output += alphabet[(triple >> 12) & 63];
+    output += i + 1 < normalized.length ? alphabet[(triple >> 6) & 63] : "=";
+    output += i + 2 < normalized.length ? alphabet[triple & 63] : "=";
   }
-  return btoa(binary);
+
+  return output;
 }
 
 function isLikelyAppScreen(frame: FrameNode): boolean {
@@ -174,13 +236,22 @@ async function exportImageByHash(
   try {
     const image = figma.getImageByHash(imageHash);
     if (image) {
-      const bytes = await image.getBytesAsync();
-      if (bytes && bytes.length > 0) {
-        return uint8ToBase64(bytes);
+      const imageAny = image as unknown as { getBytesAsync?: () => Promise<Uint8Array> };
+      logExportDebug(`[LaunchVid] imageHash ${imageHash} getBytesAsync=${typeof imageAny.getBytesAsync}`);
+      if (typeof imageAny.getBytesAsync !== "function") {
+        logExportDebug(`[LaunchVid] imageHash ${imageHash} does not expose getBytesAsync()`);
+      } else {
+        const bytes = toUint8Array(await imageAny.getBytesAsync());
+        if (bytes && bytes.length > 0) {
+          return uint8ToBase64(bytes);
+        }
+        logExportDebug(`[LaunchVid] imageHash ${imageHash} returned empty bytes`);
       }
+    } else {
+      logExportDebug(`[LaunchVid] imageHash ${imageHash} was not found via figma.getImageByHash()`);
     }
   } catch (e) {
-    console.warn(`[LaunchVid] getBytesAsync failed for hash ${imageHash}:`, e);
+    logExportDebug(`[LaunchVid] getBytesAsync failed for hash ${imageHash}: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
   }
 
   // Strategy 2 — exportAsync on the node itself
@@ -194,8 +265,9 @@ async function exportImageByHash(
       if (bytes && bytes.length > 0) {
         return uint8ToBase64(bytes);
       }
+      logExportDebug(`[LaunchVid] exportAsync returned empty bytes for fallback node "${fallbackNode.name}"`);
     } catch (e) {
-      console.error(`[LaunchVid] exportAsync also failed for "${fallbackNode.name}":`, e);
+      logExportDebug(`[LaunchVid] exportAsync also failed for "${fallbackNode.name}": ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
     }
   }
 
@@ -208,14 +280,65 @@ async function exportImageByHash(
  */
 async function exportNodeAsPng(node: SceneNode): Promise<string | null> {
   try {
-    const bytes = await (node as ExportMixin).exportAsync({
+    logExportCapabilities(node, "exportNodeAsPng");
+    const exportAny = node as unknown as { exportAsync?: (settings: ExportSettings) => Promise<Uint8Array> };
+    if (typeof exportAny.exportAsync !== "function") {
+      logExportDebug(`[LaunchVid] exportAsync is not a function for "${node.name}" (${node.type})`);
+      return null;
+    }
+
+    const rawBytes = await exportAny.exportAsync({
       format: "PNG",
       constraint: { type: "SCALE", value: 2 },
-    });
-    return bytes && bytes.length > 0 ? uint8ToBase64(bytes) : null;
-  } catch (e) {
-    console.error(`[LaunchVid] exportNodeAsPng failed for "${node.name}":`, e);
+    } as ExportSettings);
+    logExportDebug(`[LaunchVid] exportAsync(PNG) raw result for "${node.name}" (${node.type}): ${describeBytes(rawBytes)}`);
+    const bytes = toUint8Array(rawBytes);
+    if (bytes && bytes.length > 0) return uint8ToBase64(bytes);
+    logExportDebug(`[LaunchVid] exportAsync(PNG) returned empty bytes for "${node.name}" (${node.type})`);
     return null;
+  } catch (e) {
+    logExportDebug(`[LaunchVid] exportNodeAsPng failed for "${node.name}" (${node.type}): ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    return null;
+  }
+}
+
+async function exportNodeAsPngViaClone(node: SceneNode): Promise<string | null> {
+  const parent = node.parent;
+  if (!parent || !("appendChild" in parent) || !("clone" in node)) return null;
+
+  let clone: SceneNode | null = null;
+  try {
+    clone = node.clone();
+    parent.appendChild(clone);
+
+    if ("visible" in clone) clone.visible = true;
+    if ("opacity" in clone) clone.opacity = 1;
+
+    if ("x" in clone && "x" in node) clone.x = node.x;
+    if ("y" in clone && "y" in node) clone.y = node.y;
+
+    logExportCapabilities(clone, "exportNodeAsPngViaClone");
+    const cloneAny = clone as unknown as { exportAsync?: (settings: ExportSettings) => Promise<Uint8Array> };
+    if (typeof cloneAny.exportAsync !== "function") {
+      logExportDebug(`[LaunchVid] clone exportAsync is not a function for "${node.name}" (${node.type})`);
+      return null;
+    }
+
+    const rawBytes = await cloneAny.exportAsync({
+      format: "PNG",
+      constraint: { type: "SCALE", value: 2 },
+    } as ExportSettings);
+    logExportDebug(`[LaunchVid] exportAsync(PNG) clone raw result for "${node.name}" (${node.type}): ${describeBytes(rawBytes)}`);
+    const bytes = toUint8Array(rawBytes);
+
+    if (bytes && bytes.length > 0) return uint8ToBase64(bytes);
+    logExportDebug(`[LaunchVid] exportAsync(PNG) on clone returned empty bytes for "${node.name}" (${node.type})`);
+    return null;
+  } catch (e) {
+    logExportDebug(`[LaunchVid] exportNodeAsPngViaClone failed for "${node.name}" (${node.type}): ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
+    return null;
+  } finally {
+    if (clone) clone.remove();
   }
 }
 
@@ -228,10 +351,23 @@ async function exportNodeAsSvg(node: SceneNode): Promise<{ svg: string | null; p
   let png: string | null = null;
 
   try {
-    const bytes = await (node as ExportMixin).exportAsync({ format: "SVG" });
-    svg = new TextDecoder().decode(bytes);
+    logExportCapabilities(node, "exportNodeAsSvg");
+    const exportAny = node as unknown as { exportAsync?: (settings: ExportSettings) => Promise<Uint8Array> };
+    if (typeof exportAny.exportAsync !== "function") {
+      logExportDebug(`[LaunchVid] exportAsync is not a function for SVG on "${node.name}" (${node.type})`);
+      png = await exportNodeAsPng(node);
+    } else {
+      const rawBytes = await exportAny.exportAsync({ format: "SVG" } as ExportSettings);
+      logExportDebug(`[LaunchVid] exportAsync(SVG) raw result for "${node.name}" (${node.type}): ${describeBytes(rawBytes)}`);
+      const bytes = toUint8Array(rawBytes);
+      svg = bytes && bytes.length > 0 ? bytesToUtf8(bytes) : null;
+      if (!svg) {
+        logExportDebug(`[LaunchVid] exportAsync(SVG) returned empty bytes for "${node.name}" (${node.type})`);
+        png = await exportNodeAsPng(node);
+      }
+    }
   } catch (e) {
-    console.warn(`[LaunchVid] SVG export failed for "${node.name}", trying PNG:`, e);
+    logExportDebug(`[LaunchVid] SVG export failed for "${node.name}" (${node.type}), trying PNG: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
     png = await exportNodeAsPng(node);
   }
 
@@ -266,8 +402,12 @@ async function serializeNode(node: SceneNode, depth = 0): Promise<SerializedLaye
     base.fill = fillData;
 
     if (fillData?.type === "IMAGE" && fillData.imageHash) {
-      // Pass the node as fallback for BOOLEAN_OPERATION children etc.
-      base.exportedImageBase64 = await exportImageByHash(fillData.imageHash, node);
+      // Prefer exporting the node directly so IMAGE fills reliably produce bytes.
+      // Hash lookup stays as a fallback when node export fails.
+      base.exportedImageBase64 =
+        (await exportNodeAsPng(node)) ??
+        (await exportImageByHash(fillData.imageHash, node)) ??
+        (await exportNodeAsPngViaClone(node));
     }
   }
 
@@ -330,12 +470,12 @@ async function serializeNode(node: SceneNode, depth = 0): Promise<SerializedLaye
   if (node.type === "VECTOR") {
     const { svg, png } = await exportNodeAsSvg(node);
     base.exportedSvg         = svg;
-    base.exportedImageBase64 = png; // only set if SVG failed
+    base.exportedImageBase64 = base.exportedImageBase64 ?? png ?? await exportNodeAsPngViaClone(node); // only set if SVG failed
   }
 
   // ── BOOLEAN_OPERATION → export as PNG (complex path math) ──
   if (node.type === "BOOLEAN_OPERATION") {
-    base.exportedImageBase64 = await exportNodeAsPng(node);
+    base.exportedImageBase64 = base.exportedImageBase64 ?? await exportNodeAsPng(node) ?? await exportNodeAsPngViaClone(node);
     // Still recurse into children so the layer tree is complete,
     // but the renderer should prefer the rasterized PNG for display.
   }
@@ -344,7 +484,7 @@ async function serializeNode(node: SceneNode, depth = 0): Promise<SerializedLaye
   // Simple SOLID fills on ellipses can be rendered with border-radius: 50%,
   // but IMAGE or GRADIENT fills on ellipses need a raster export.
   if (node.type === "ELLIPSE" && base.fill && base.fill.type !== "SOLID") {
-    base.exportedImageBase64 = await exportNodeAsPng(node);
+    base.exportedImageBase64 = base.exportedImageBase64 ?? await exportNodeAsPng(node) ?? await exportNodeAsPngViaClone(node);
   }
 
   // ── Children (recursive, capped at depth 6) ──
@@ -408,6 +548,7 @@ async function exportSelectedFrames(selectedIds: string[]) {
 
   const result = [];
   let done = 0;
+  exportDebugLog.length = 0;
 
   for (const page of figma.root.children) {
     await figma.setCurrentPageAsync(page);
@@ -430,9 +571,13 @@ async function exportSelectedFrames(selectedIds: string[]) {
           format: "PNG",
           constraint: { type: "SCALE", value: 2 },
         });
-        fullPngBase64 = uint8ToBase64(bytes);
+        if (bytes && bytes.length > 0) {
+          fullPngBase64 = uint8ToBase64(bytes);
+        } else {
+          logExportDebug(`[LaunchVid] full frame export returned empty bytes for "${frame.name}" (${frame.id})`);
+        }
       } catch (e) {
-        console.error(`[LaunchVid] Full frame export failed for "${frame.name}":`, e);
+        logExportDebug(`[LaunchVid] Full frame export failed for "${frame.name}" (${frame.id}): ${e instanceof Error ? e.message : String(e)}`);
       }
 
       // Full layer tree with all images, SVGs, gradients extracted
@@ -447,6 +592,7 @@ async function exportSelectedFrames(selectedIds: string[]) {
         height:       frame.height,
         fullPngBase64,
         layers,
+        debugLog: [...exportDebugLog],
       });
 
       done++;

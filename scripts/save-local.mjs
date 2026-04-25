@@ -5,6 +5,66 @@ import { resolve } from "node:path";
 const PORT = 3210;
 const OUTPUT_DIR = resolve("output");
 
+function walkLayers(layer, visitor, path = []) {
+  const nextPath = [...path, layer.name || layer.id || layer.type];
+  visitor(layer, nextPath);
+
+  if (Array.isArray(layer.children)) {
+    for (const child of layer.children) {
+      walkLayers(child, visitor, nextPath);
+    }
+  }
+}
+
+function summarizeNullExports(payload) {
+  const warnings = [];
+  const frames = Array.isArray(payload?.frames) ? payload.frames : [];
+
+  for (const frame of frames) {
+    if (!frame.fullPngBase64) {
+      warnings.push(`[LaunchVid] frame "${frame.frameName}" has empty fullPngBase64`);
+    }
+
+    const layers = frame.layers;
+    if (!layers) continue;
+
+    walkLayers(layers, (layer, path) => {
+      const fillType = layer.fill?.type;
+      const looksExportable =
+        fillType === "IMAGE" ||
+        layer.type === "VECTOR" ||
+        layer.type === "BOOLEAN_OPERATION" ||
+        (layer.type === "ELLIPSE" && fillType && fillType !== "SOLID");
+
+      if (!looksExportable) return;
+
+      const hasRaster = Boolean(layer.exportedImageBase64);
+      const hasSvg = Boolean(layer.exportedSvg);
+
+      if (!hasRaster && !hasSvg) {
+        warnings.push(
+          `[LaunchVid] null export at ${path.join(" > ")} | type=${layer.type} | fill=${fillType ?? "none"} | imageHash=${layer.fill?.imageHash ?? "none"}`
+        );
+      }
+    });
+  }
+
+  return warnings;
+}
+
+function printDebugLogs(payload) {
+  const frames = Array.isArray(payload?.frames) ? payload.frames : [];
+
+  for (const frame of frames) {
+    if (!Array.isArray(frame.debugLog) || frame.debugLog.length === 0) continue;
+
+    console.log(`[LaunchVid] Debug log for frame "${frame.frameName}":`);
+    for (const line of frame.debugLog) {
+      console.log(line);
+    }
+  }
+}
+
 function sendJson(res, statusCode, payload) {
   res.writeHead(statusCode, {
     "Content-Type": "application/json",
@@ -46,6 +106,18 @@ const server = createServer(async (req, res) => {
 
     const raw = Buffer.concat(chunks).toString("utf8");
     const parsed = JSON.parse(raw);
+
+    const warnings = summarizeNullExports(parsed);
+    printDebugLogs(parsed);
+    console.log(`[LaunchVid] Received export payload: ${Array.isArray(parsed?.frames) ? parsed.frames.length : 0} frame(s)`);
+    if (warnings.length === 0) {
+      console.log("[LaunchVid] No null export fields found on image-related nodes.");
+    } else {
+      console.warn(`[LaunchVid] Found ${warnings.length} null export warning(s):`);
+      for (const warning of warnings) {
+        console.warn(warning);
+      }
+    }
 
     await mkdir(OUTPUT_DIR, { recursive: true });
 
