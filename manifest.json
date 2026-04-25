@@ -1,0 +1,9 @@
+{
+  "name": "LaunchVid — Export for Video",
+  "id": "launchvid-export-001",
+  "api": "1.0.0",
+  "main": "src/plugin.js",
+  "ui": "src/ui.html",
+  "editorType": ["figma"],
+  "documentAccess": "dynamic-page"
+}

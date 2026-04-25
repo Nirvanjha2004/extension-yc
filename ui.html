@@ -1,0 +1,652 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LaunchVid</title>
+<style>
+  /* ── Reset & base ── */
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #ffffff;
+    --bg2: #f5f5f5;
+    --bg3: #ebebeb;
+    --text: #1a1a1a;
+    --text2: #666;
+    --text3: #999;
+    --border: #e0e0e0;
+    --accent: #7b5ea7;
+    --accent-light: #f0ebf9;
+    --accent-dark: #5c4080;
+    --green: #27ae60;
+    --red: #e74c3c;
+    --radius: 8px;
+    --font: "Inter", -apple-system, sans-serif;
+  }
+
+  body {
+    font-family: var(--font);
+    font-size: 12px;
+    color: var(--text);
+    background: var(--bg);
+    overflow-x: hidden;
+    line-height: 1.4;
+  }
+
+  /* ── Header ── */
+  .header {
+    padding: 14px 16px 10px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .logo {
+    width: 22px; height: 22px;
+    background: var(--accent);
+    border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: #fff; font-size: 11px; font-weight: 700; flex-shrink: 0;
+  }
+  .header-title { font-weight: 600; font-size: 13px; }
+  .header-sub { font-size: 10px; color: var(--text3); margin-left: auto; }
+
+  /* ── Loading state ── */
+  #loading-screen {
+    padding: 48px 16px;
+    text-align: center;
+    color: var(--text2);
+  }
+  .spinner {
+    width: 20px; height: 20px;
+    border: 2px solid var(--border);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Main layout ── */
+  #main-screen { display: none; flex-direction: column; height: calc(100vh - 49px); }
+
+  /* ── Toolbar ── */
+  .toolbar {
+    padding: 8px 12px;
+    display: flex; align-items: center; gap: 6px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg2);
+  }
+  .toolbar-label { font-size: 11px; color: var(--text2); flex: 1; }
+  .btn-xs {
+    font-size: 10px; font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--text2);
+    cursor: pointer;
+  }
+  .btn-xs:hover { background: var(--bg3); }
+
+  /* ── Frame list (scrollable) ── */
+  #frame-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+
+  /* ── Page group header ── */
+  .page-group {}
+  .page-header {
+    padding: 6px 14px 4px;
+    font-size: 10px; font-weight: 600;
+    color: var(--text3);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    display: flex; align-items: center; gap: 4px;
+    position: sticky; top: 0;
+    background: var(--bg);
+    z-index: 1;
+  }
+  .page-header span { flex: 1; }
+  .page-count {
+    background: var(--bg3);
+    border-radius: 20px;
+    padding: 1px 6px;
+    font-size: 9px;
+    color: var(--text3);
+  }
+
+  /* ── Frame row ── */
+  .frame-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: background .1s;
+    user-select: none;
+  }
+  .frame-row:hover { background: var(--bg2); }
+  .frame-row.selected { background: var(--accent-light); }
+  .frame-row.dragging { opacity: .4; }
+  .frame-row.drag-over { border-top: 2px solid var(--accent); }
+
+  /* checkbox */
+  .frame-check {
+    width: 14px; height: 14px; flex-shrink: 0;
+    border: 1.5px solid var(--border);
+    border-radius: 3px;
+    display: flex; align-items: center; justify-content: center;
+    transition: all .1s;
+  }
+  .frame-row.selected .frame-check {
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+  .frame-row.selected .frame-check::after {
+    content: "";
+    width: 7px; height: 5px;
+    border-left: 1.5px solid #fff;
+    border-bottom: 1.5px solid #fff;
+    transform: rotate(-45deg) translate(1px, -1px);
+    display: block;
+  }
+
+  /* thumbnail */
+  .frame-thumb {
+    width: 40px; height: 40px; flex-shrink: 0;
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .frame-thumb img { width: 100%; height: 100%; object-fit: contain; }
+  .frame-thumb-placeholder {
+    font-size: 16px; color: var(--border);
+  }
+
+  /* info */
+  .frame-info { flex: 1; min-width: 0; }
+  .frame-name {
+    font-size: 12px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .frame-meta { font-size: 10px; color: var(--text3); margin-top: 1px; }
+
+  /* suggested badge */
+  .badge-suggested {
+    font-size: 9px; font-weight: 600;
+    background: #e8f5e9; color: #2e7d32;
+    padding: 1px 5px; border-radius: 10px;
+    flex-shrink: 0;
+  }
+
+  /* drag handle */
+  .drag-handle {
+    cursor: grab; color: var(--text3);
+    font-size: 14px; flex-shrink: 0;
+    padding: 2px;
+  }
+  .drag-handle:active { cursor: grabbing; }
+
+  /* order number (shown on selected frames) */
+  .order-badge {
+    width: 16px; height: 16px; flex-shrink: 0;
+    background: var(--accent);
+    color: #fff; font-size: 9px; font-weight: 700;
+    border-radius: 50%;
+    display: none; align-items: center; justify-content: center;
+  }
+  .frame-row.selected .order-badge { display: flex; }
+  .frame-row.selected .frame-check { display: none; }
+
+  /* ── Selected tray ── */
+  #selected-tray {
+    border-top: 1px solid var(--border);
+    padding: 10px 14px;
+    background: var(--bg2);
+  }
+  .tray-label {
+    font-size: 10px; font-weight: 600; color: var(--text2);
+    margin-bottom: 6px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .tray-count {
+    background: var(--accent);
+    color: #fff;
+    border-radius: 20px;
+    padding: 0px 6px;
+    font-size: 9px;
+  }
+  #tray-chips {
+    display: flex; flex-wrap: wrap; gap: 4px;
+    min-height: 22px;
+    margin-bottom: 10px;
+  }
+  .chip {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 2px 8px 2px 6px;
+    font-size: 10px;
+    display: flex; align-items: center; gap: 4px;
+  }
+  .chip-num {
+    width: 14px; height: 14px;
+    background: var(--accent); color: #fff;
+    border-radius: 50%; font-size: 8px; font-weight: 700;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .chip-remove {
+    cursor: pointer; color: var(--text3); font-size: 11px;
+    line-height: 1;
+  }
+  .chip-remove:hover { color: var(--red); }
+  .tray-empty { font-size: 10px; color: var(--text3); font-style: italic; }
+
+  /* ── Export button ── */
+  .btn-export {
+    width: 100%;
+    padding: 10px;
+    background: var(--accent);
+    color: #fff;
+    border: none; border-radius: var(--radius);
+    font-size: 13px; font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  .btn-export:hover { background: var(--accent-dark); }
+  .btn-export:disabled {
+    background: var(--border); color: var(--text3); cursor: not-allowed;
+  }
+
+  /* ── Progress / sending state ── */
+  #progress-screen {
+    display: none;
+    padding: 24px 16px;
+  }
+  .progress-title { font-weight: 600; font-size: 13px; margin-bottom: 4px; }
+  .progress-msg { font-size: 11px; color: var(--text2); margin-bottom: 12px; }
+  .progress-bar-bg {
+    height: 4px; border-radius: 2px;
+    background: var(--border); overflow: hidden;
+  }
+  .progress-bar-fill {
+    height: 100%; border-radius: 2px;
+    background: var(--accent);
+    width: 0%; transition: width .3s;
+  }
+
+  /* ── Done screen ── */
+  #done-screen {
+    display: none;
+    padding: 32px 16px;
+    text-align: center;
+  }
+  .done-icon { font-size: 32px; margin-bottom: 8px; }
+  .done-title { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+  .done-sub { font-size: 11px; color: var(--text2); margin-bottom: 16px; }
+  .btn-again {
+    font-size: 12px; font-weight: 500;
+    padding: 7px 16px;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+    background: var(--bg);
+    cursor: pointer;
+  }
+  .btn-again:hover { background: var(--bg2); }
+
+  /* ── Error screen ── */
+  #error-screen {
+    display: none;
+    padding: 24px 16px;
+  }
+  .error-msg {
+    background: #fdf0f0; border: 1px solid #f5c6c6;
+    border-radius: var(--radius);
+    padding: 10px 12px;
+    font-size: 11px; color: var(--red);
+    margin-bottom: 12px;
+  }
+
+  /* scrollbar */
+  #frame-list::-webkit-scrollbar { width: 4px; }
+  #frame-list::-webkit-scrollbar-track { background: transparent; }
+  #frame-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="header">
+  <div class="logo">LV</div>
+  <div class="header-title">LaunchVid</div>
+  <div class="header-sub">Select screens → Export</div>
+</div>
+
+<!-- ── Loading ── -->
+<div id="loading-screen">
+  <div class="spinner"></div>
+  <div id="loading-msg">Scanning your file...</div>
+</div>
+
+<!-- ── Main ── -->
+<div id="main-screen">
+  <div class="toolbar">
+    <span class="toolbar-label" id="toolbar-label">0 frames found</span>
+    <button class="btn-xs" id="btn-select-suggested">Auto-select</button>
+    <button class="btn-xs" id="btn-select-all">All</button>
+    <button class="btn-xs" id="btn-clear">Clear</button>
+  </div>
+
+  <div id="frame-list"></div>
+
+  <div id="selected-tray">
+    <div class="tray-label">
+      Selected order
+      <span class="tray-count" id="tray-count">0</span>
+    </div>
+    <div id="tray-chips"><span class="tray-empty">No screens selected yet</span></div>
+    <button class="btn-export" id="btn-export" disabled>
+      Export for Video
+    </button>
+  </div>
+</div>
+
+<!-- ── Progress ── -->
+<div id="progress-screen">
+  <div class="progress-title">Exporting...</div>
+  <div class="progress-msg" id="progress-msg">Preparing...</div>
+  <div class="progress-bar-bg">
+    <div class="progress-bar-fill" id="progress-fill"></div>
+  </div>
+</div>
+
+<!-- ── Done ── -->
+<div id="done-screen">
+  <div class="done-icon">✅</div>
+  <div class="done-title">Export complete!</div>
+  <div class="done-sub" id="done-sub">Your frames have been sent.</div>
+  <button class="btn-again" id="btn-again">Export another set</button>
+</div>
+
+<!-- ── Error ── -->
+<div id="error-screen">
+  <div class="error-msg" id="error-msg">Something went wrong.</div>
+  <button class="btn-again" id="btn-retry">Try again</button>
+</div>
+
+<script>
+// ─── State ─────────────────────────────────────────────────────────────────
+
+let allFrames = [];          // FrameInfo[] from plugin
+let selectedIds = [];        // ordered list of selected frame IDs
+let totalFrames = 0;
+let exportedCount = 0;
+
+// ─── Screen manager ────────────────────────────────────────────────────────
+
+function showScreen(name) {
+  ['loading-screen','main-screen','progress-screen','done-screen','error-screen']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      el.style.display = 'none';
+    });
+  const target = document.getElementById(name);
+  target.style.display = (name === 'main-screen') ? 'flex' : 'block';
+}
+
+// ─── Render frame list ──────────────────────────────────────────────────────
+
+function renderList() {
+  const list = document.getElementById('frame-list');
+  list.innerHTML = '';
+
+  // group by page
+  const pages = {};
+  for (const f of allFrames) {
+    if (!pages[f.pageId]) pages[f.pageId] = { name: f.pageName, frames: [] };
+    pages[f.pageId].frames.push(f);
+  }
+
+  for (const [pageId, page] of Object.entries(pages)) {
+    const group = document.createElement('div');
+    group.className = 'page-group';
+
+    const header = document.createElement('div');
+    header.className = 'page-header';
+    header.innerHTML = `<span>${page.name}</span><span class="page-count">${page.frames.length}</span>`;
+    group.appendChild(header);
+
+    for (const frame of page.frames) {
+      group.appendChild(buildFrameRow(frame));
+    }
+    list.appendChild(group);
+  }
+
+  updateToolbarLabel();
+}
+
+function buildFrameRow(frame) {
+  const row = document.createElement('div');
+  row.className = 'frame-row' + (selectedIds.includes(frame.id) ? ' selected' : '');
+  row.dataset.id = frame.id;
+  row.draggable = selectedIds.includes(frame.id);
+
+  const orderIndex = selectedIds.indexOf(frame.id) + 1;
+
+  row.innerHTML = `
+    <div class="order-badge">${orderIndex}</div>
+    <div class="frame-check"></div>
+    <div class="frame-thumb">
+      ${frame.thumbnailBase64
+        ? `<img src="data:image/png;base64,${frame.thumbnailBase64}" alt="${frame.name}" />`
+        : `<span class="frame-thumb-placeholder">▭</span>`}
+    </div>
+    <div class="frame-info">
+      <div class="frame-name">${frame.name}</div>
+      <div class="frame-meta">${frame.width} × ${frame.height} · ${frame.pageName}</div>
+    </div>
+    ${frame.isLikelyAppScreen ? '<span class="badge-suggested">✓ App screen</span>' : ''}
+    <span class="drag-handle" title="Drag to reorder">⠿</span>
+  `;
+
+  // click to toggle selection
+  row.addEventListener('click', (e) => {
+    if (e.target.classList.contains('drag-handle')) return;
+    toggleFrame(frame.id);
+  });
+
+  // drag to reorder (only works when selected)
+  row.addEventListener('dragstart', (e) => {
+    if (!selectedIds.includes(frame.id)) { e.preventDefault(); return; }
+    e.dataTransfer.setData('text/plain', frame.id);
+    row.classList.add('dragging');
+  });
+  row.addEventListener('dragend', () => row.classList.remove('dragging'));
+  row.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    row.classList.add('drag-over');
+  });
+  row.addEventListener('dragleave', () => row.classList.remove('drag-over'));
+  row.addEventListener('drop', (e) => {
+    e.preventDefault();
+    row.classList.remove('drag-over');
+    const draggedId = e.dataTransfer.getData('text/plain');
+    const targetId = frame.id;
+    if (draggedId === targetId) return;
+    reorderSelected(draggedId, targetId);
+  });
+
+  return row;
+}
+
+function toggleFrame(id) {
+  const idx = selectedIds.indexOf(id);
+  if (idx === -1) {
+    selectedIds.push(id);
+  } else {
+    selectedIds.splice(idx, 1);
+  }
+  refreshUI();
+}
+
+function reorderSelected(draggedId, targetId) {
+  if (!selectedIds.includes(draggedId) || !selectedIds.includes(targetId)) return;
+  const from = selectedIds.indexOf(draggedId);
+  const to = selectedIds.indexOf(targetId);
+  selectedIds.splice(from, 1);
+  selectedIds.splice(to, 0, draggedId);
+  refreshUI();
+}
+
+function refreshUI() {
+  renderList();
+  renderTray();
+  document.getElementById('btn-export').disabled = selectedIds.length === 0;
+  document.getElementById('tray-count').textContent = selectedIds.length;
+}
+
+// ─── Tray chips ────────────────────────────────────────────────────────────
+
+function renderTray() {
+  const container = document.getElementById('tray-chips');
+  container.innerHTML = '';
+
+  if (selectedIds.length === 0) {
+    container.innerHTML = '<span class="tray-empty">No screens selected yet</span>';
+    return;
+  }
+
+  selectedIds.forEach((id, i) => {
+    const frame = allFrames.find(f => f.id === id);
+    if (!frame) return;
+
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.innerHTML = `
+      <span class="chip-num">${i + 1}</span>
+      <span>${frame.name}</span>
+      <span class="chip-remove" data-id="${id}">×</span>
+    `;
+    chip.querySelector('.chip-remove').addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectedIds = selectedIds.filter(sid => sid !== id);
+      refreshUI();
+    });
+    container.appendChild(chip);
+  });
+}
+
+// ─── Toolbar buttons ────────────────────────────────────────────────────────
+
+function updateToolbarLabel() {
+  document.getElementById('toolbar-label').textContent =
+    `${allFrames.length} frames across ${getPageCount()} pages`;
+}
+
+function getPageCount() {
+  return new Set(allFrames.map(f => f.pageId)).size;
+}
+
+document.getElementById('btn-select-suggested').addEventListener('click', () => {
+  selectedIds = allFrames.filter(f => f.isLikelyAppScreen).map(f => f.id);
+  refreshUI();
+});
+
+document.getElementById('btn-select-all').addEventListener('click', () => {
+  selectedIds = allFrames.map(f => f.id);
+  refreshUI();
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  selectedIds = [];
+  refreshUI();
+});
+
+// ─── Export ────────────────────────────────────────────────────────────────
+
+document.getElementById('btn-export').addEventListener('click', () => {
+  if (selectedIds.length === 0) return;
+  totalFrames = selectedIds.length;
+  exportedCount = 0;
+  document.getElementById('progress-msg').textContent = 'Preparing export...';
+  document.getElementById('progress-fill').style.width = '0%';
+  showScreen('progress-screen');
+  parent.postMessage({
+    pluginMessage: { type: 'EXPORT_SELECTED', selectedIds }
+  }, '*');
+});
+
+document.getElementById('btn-again').addEventListener('click', () => {
+  showScreen('main-screen');
+});
+
+document.getElementById('btn-retry').addEventListener('click', () => {
+  showScreen('main-screen');
+});
+
+// ─── Messages from plugin.ts ────────────────────────────────────────────────
+
+window.onmessage = async (event) => {
+  const msg = event.data.pluginMessage;
+  if (!msg) return;
+
+  if (msg.type === 'LOADING') {
+    document.getElementById('loading-msg').textContent = msg.message;
+  }
+
+  if (msg.type === 'FRAMES_LOADED') {
+    allFrames = msg.frames;
+    // auto-select suggested screens on first load
+    selectedIds = allFrames.filter(f => f.isLikelyAppScreen).map(f => f.id);
+    renderList();
+    renderTray();
+    refreshUI();
+    showScreen('main-screen');
+  }
+
+  if (msg.type === 'EXPORT_PROGRESS') {
+    document.getElementById('progress-msg').textContent = msg.message;
+    exportedCount++;
+    const pct = Math.min(95, Math.round((exportedCount / totalFrames) * 90));
+    document.getElementById('progress-fill').style.width = pct + '%';
+  }
+
+  if (msg.type === 'EXPORT_DONE') {
+    document.getElementById('progress-fill').style.width = '100%';
+
+    // Send the data to your backend
+    try {
+      const BACKEND_URL = 'https://your-backend.railway.app/analyze'; // ← update this
+
+      const response = await fetch(BACKEND_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          frames: msg.data,
+          appDescription: '', // could add an input field for this
+          exportedAt: new Date().toISOString(),
+        }),
+      });
+
+      if (!response.ok) throw new Error(`Server error: ${response.status}`);
+
+      const result = await response.json();
+
+      document.getElementById('done-sub').textContent =
+        `${msg.data.length} screens sent successfully. Check your dashboard for the video.`;
+      showScreen('done-screen');
+
+    } catch (err) {
+      document.getElementById('error-msg').textContent =
+        `Export failed: ${err.message}. Make sure your backend is running.`;
+      showScreen('error-screen');
+    }
+  }
+};
+</script>
+</body>
+</html>
